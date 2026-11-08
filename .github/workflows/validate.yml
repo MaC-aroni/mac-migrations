@@ -1,0 +1,27 @@
+name: validate
+
+on:
+  push:
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # MaC's own validator, from the platform repo, so the rules here never drift from MaC's.
+      - uses: actions/checkout@v4
+        with:
+          repository: MaC-aroni/deployed-on-a-prayer
+          path: .mac
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -r .mac/backend/requirements.txt
+      - name: mac validate
+        env:
+          PYTHONPATH: .mac/backend
+        run: |
+          shopt -s nullglob
+          specs=(migrations/*/migration.yaml)
+          if [ ${#specs[@]} -eq 0 ]; then echo "no migrations yet"; exit 0; fi
+          for spec in "${specs[@]}"; do python -m mac validate "$spec" || exit 1; done
