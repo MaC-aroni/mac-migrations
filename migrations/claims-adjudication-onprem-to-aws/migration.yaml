@@ -1,0 +1,216 @@
+apiVersion: mac/v0.3
+kind: Migration
+metadata:
+  name: claims-adjudication-onprem-to-aws
+  service: ClaimsAdjudicationService
+  owner_team: claims-platform
+  generated_by: mac-planner
+target:
+  provider: aws
+  account: "000000000000"
+  region: us-east-1
+stages:
+  - check
+  - infrastructure
+  - data
+  - release
+  - access
+  - verify
+approvals:
+  - id: APPR-TECH-RISK
+    type: tech_risk_cloud_migration
+    approver: tech-risk
+    summary: ClaimsAdjudicationService migration to AWS
+    justification: Every change a cloud migration makes to production needs Tech Risk approval (creating storage, roles, functions, moving data, deploying services). One approval covers one version of the migration plan.
+    after: []
+    design_doc: true
+    sources:
+      - techrisk-cloud-migration#what-needs-tech-risk-approval
+      - directory-approvers#approvers
+      - directory-approvers#approval-types
+      - platform-landing-zone#scope
+  - id: APPR-MANAGER
+    type: access_request_manager
+    approver: manager
+    summary: Grant mac-claims-<env>-service access to Claims MCP tool
+    justification: ClaimsAdjudicationService calls check_eligibility on the Claims MCP tool. Access grants between services are approved by the requester's manager first, then the owning team.
+    after: []
+    design_doc: false
+    sources:
+      - service-claims-mcp#consumers
+      - access-mcp#approvals-in-order
+      - directory-approvers#approvers
+      - directory-approvers#approval-types
+  - id: APPR-MCP-TEAM
+    type: access_request_owner
+    approver: claims-mcp-team
+    summary: Grant mac-claims-<env>-service access to Claims MCP tool
+    justification: ClaimsAdjudicationService calls check_eligibility on the Claims MCP tool. The owning team (claims-mcp-team) approves after the manager.
+    after:
+      - APPR-MANAGER
+    design_doc: false
+    sources:
+      - service-claims-mcp#consumers
+      - access-mcp#approvals-in-order
+      - directory-approvers#approvers
+      - directory-approvers#approval-types
+steps:
+  - id: preflight_check
+    stage: check
+    type: check
+    requires_approval: []
+    codegen: engineer
+    run:
+      repo: github.com/MaC-aroni/claims-smoke-tests
+      entrypoint: checks/preflight.py
+    rollback: none
+    sources:
+      - qa-smoke-testing#before-a-migration-preflight
+      - generated-claims-smoke-tests#what-it-does
+      - generated-claims-smoke-tests#repositories
+      - service-claims-adjudication#repositories
+      - qa-smoke-testing#where-the-checks-live
+  - id: create_claims_table
+    stage: infrastructure
+    type: iac
+    requires_approval:
+      - APPR-TECH-RISK
+    codegen: engineer
+    run:
+      repo: github.com/MaC-aroni/claims-service-iac
+      path: terraform/storage
+    sources:
+      - platform-terraform#layout
+      - platform-naming#resource-names
+      - platform-landing-zone#changes
+      - platform-terraform#checks
+      - service-claims-adjudication#repositories
+      - platform-landing-zone#approved-services
+  - id: create_iam_roles
+    stage: infrastructure
+    type: iac
+    requires_approval:
+      - APPR-TECH-RISK
+    codegen: engineer
+    run:
+      repo: github.com/MaC-aroni/claims-service-iac
+      path: terraform/iam
+    sources:
+      - platform-terraform#layout
+      - platform-lambda#roles
+      - platform-naming#resource-names
+      - platform-landing-zone#changes
+      - platform-terraform#checks
+      - service-claims-adjudication#repositories
+      - platform-landing-zone#approved-services
+  - id: data_migration
+    stage: data
+    type: db_migration
+    requires_approval:
+      - APPR-TECH-RISK
+    when: manual
+    codegen: engineer
+    run:
+      repo: github.com/MaC-aroni/claims-db-migrate
+      entrypoint: migrate.py
+    verify:
+      entrypoint: verify.py
+    rollback:
+      entrypoint: rollback.py
+    sources:
+      - data-migration#claims-data-is-phi
+      - data-migration#the-claims-db-export
+      - data-migration#converting-the-data
+      - data-migration#checking-the-copy
+      - service-claims-adjudication#repositories
+      - service-claims-adjudication#dependencies
+  - id: deploy_mcp_tool
+    stage: release
+    type: iac
+    requires_approval:
+      - APPR-TECH-RISK
+    codegen: engineer
+    run:
+      repo: github.com/MaC-aroni/claims-mcp-server
+      path: terraform/server
+    outputs:
+      - name: url
+        description: Function URL for the Claims MCP tool (mac-claims-<env>-mcp)
+        probes:
+          - name: health
+            method: GET
+            path: /health
+          - name: tools_list
+            method: POST
+            path: /
+            body: {"jsonrpc": "2.0", "id": 1, "method": "tools/list"}
+    sources:
+      - platform-lambda#runtime
+      - platform-lambda#endpoints
+      - platform-lambda#roles
+      - platform-lambda#configuration
+      - platform-naming#resource-names
+      - service-claims-mcp#repository
+      - service-claims-mcp#today-and-target
+      - platform-mcp#how-an-mcp-tool-is-hosted
+  - id: deploy_service
+    stage: release
+    type: iac
+    requires_approval:
+      - APPR-TECH-RISK
+    codegen: engineer
+    run:
+      repo: github.com/MaC-aroni/claims-service-iac
+      path: terraform/service
+    outputs:
+      - name: url
+        description: Function URL for ClaimsAdjudicationService (mac-claims-<env>-service)
+        probes:
+          - name: health
+            method: GET
+            path: /health
+          - name: adjudicate
+            method: POST
+            path: /adjudicate
+            body: {"claim_id": "CLM-1001"}
+    sources:
+      - platform-lambda#runtime
+      - platform-lambda#endpoints
+      - platform-lambda#roles
+      - platform-lambda#configuration
+      - platform-naming#resource-names
+      - service-claims-adjudication#target-aws
+      - service-claims-adjudication#repositories
+  - id: grant_mcp_access
+    stage: access
+    type: iac
+    requires_approval:
+      - APPR-TECH-RISK
+      - APPR-MANAGER
+      - APPR-MCP-TEAM
+    codegen: engineer
+    run:
+      repo: github.com/MaC-aroni/claims-mcp-server
+      path: terraform/access
+    sources:
+      - platform-mcp#how-access-is-granted
+      - access-mcp#the-change-itself
+      - service-claims-mcp#consumers
+      - service-claims-mcp#repository
+      - access-mcp#when-this-applies
+  - id: smoke_test
+    stage: verify
+    type: check
+    requires_approval: []
+    codegen: engineer
+    run:
+      repo: github.com/MaC-aroni/claims-smoke-tests
+      entrypoint: checks/smoke.py
+    rollback: none
+    sources:
+      - qa-smoke-testing#after-a-migration-smoke-test
+      - generated-claims-smoke-tests#what-it-does
+      - generated-claims-smoke-tests#repositories
+      - service-claims-adjudication#repositories
+      - qa-smoke-testing#where-the-checks-live
+      - service-claims-adjudication#what-it-does
